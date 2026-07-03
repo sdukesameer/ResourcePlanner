@@ -24,13 +24,13 @@ This is a static site: `index.html`, `style.css`, `app.js`. Push the folder to a
 
 ## Data & storage
 
-All data is stored in the browser's `localStorage` (key `resourcePlannerState_v1`), scoped per month. **Nothing is sent to a server** — this means:
+All data is stored in the browser's `localStorage` (key `capacityLedgerState_v1`), scoped per month. **Nothing is sent to a server** — this means:
 
 - Data is per-browser, per-device. Opening the app on another machine or browser starts empty.
 - Clearing site data/cookies for the deployed domain will erase your data.
 - Use **Export data** regularly to back up, and **Import data** to move data between devices or browsers.
 
-Theme preference is stored separately under `resourcePlannerTheme`.
+Theme preference is stored separately under `capacityLedgerTheme`.
 
 ## How the hours are calculated
 

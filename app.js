@@ -4,7 +4,7 @@
    STATE
    ========================================================= */
 
-const STORAGE_KEY = 'resourcePlannerState_v1';
+const STORAGE_KEY = 'capacityLedgerState_v1';
 const RESOURCE_COLORS = ['#2B3A67', '#1F9D8A', '#D98E2B', '#D9556B', '#6D5DAB', '#3A8FB7', '#B7772E', '#4E8C5E'];
 
 let state = loadState();
@@ -196,6 +196,36 @@ function isResourceUnbillable(monthKey, resourceId, weekNum) {
   return false;
 }
 
+/**
+ * True if this resource should count toward hours on dateStr at all: assigned, billable,
+ * not on leave, and not a holiday. Used by the bulk "adjust effort" tool so it never
+ * projects or writes hours onto a resource who isn't actually active that day.
+ */
+function isResourceEligibleForBulkAdjust(monthKey, resourceObj, dateStr, weekNum) {
+  const monthData = getMonthData(monthKey);
+  if (monthData.holidays[dateStr]) return false;
+  if (!isResourceAssigned(resourceObj, dateStr)) return false;
+  if (isResourceUnbillable(monthKey, resourceObj.id, weekNum)) return false;
+  const leaveEntry = monthData.leaves[dateStr] && monthData.leaves[dateStr][resourceObj.id];
+  if (leaveEntry) return false;
+  return true;
+}
+
+/** True if the resource's assigned range (if any) overlaps [rangeStartStr, rangeEndStr] at all. */
+function isResourceAssignedDuringRange(resourceObj, rangeStartStr, rangeEndStr) {
+  if (resourceObj.endDate && resourceObj.endDate < rangeStartStr) return false;
+  if (resourceObj.startDate && resourceObj.startDate > rangeEndStr) return false;
+  return true;
+}
+
+/** True if the resource's assigned range (if any) overlaps this month at all. */
+function isResourceActiveInMonth(resourceObj, year, month) {
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const monthStartStr = dateKeyFromParts(year, month, 1);
+  const monthEndStr = dateKeyFromParts(year, month, daysInMonth);
+  return isResourceAssignedDuringRange(resourceObj, monthStartStr, monthEndStr);
+}
+
 /** Avoids floating point drift (e.g. 8.1 + 0.25 = 8.099999...) when stacking 0.125-step adjustments. */
 function roundToQuarter(value) {
   return Math.round(value * 1000) / 1000;
@@ -295,11 +325,12 @@ function renderResourcesTab() {
 
   state.resourceList.forEach(resource => {
     const override = getResourceOverride(monthKey, resource.id);
+    const activeThisMonth = isResourceActiveInMonth(resource, currentYear, currentMonth);
     const card = document.createElement('div');
     card.className = 'resource-card';
 
     const top = document.createElement('div');
-    top.className = 'resource-card-top';
+    top.className = 'resource-card-top' + (activeThisMonth ? '' : ' is-inactive-period');
 
     const dot = document.createElement('span');
     dot.className = 'resource-dot';
@@ -414,11 +445,17 @@ function renderResourcesTab() {
 
       const wrap = document.createElement('div');
       wrap.className = 'week-toggle';
+      const weekStartStr = dateKeyFromDate(week[0]);
+      const weekEndStr = dateKeyFromDate(week[6]);
+      const assignedThisWeek = isResourceAssignedDuringRange(resource, weekStartStr, weekEndStr);
+      if (!assignedThisWeek) wrap.classList.add('is-inactive-period');
+
       const label = document.createElement('span');
       label.textContent = `Week ${weekNum}`;
       wrap.appendChild(label);
 
       const sel = document.createElement('select');
+      sel.disabled = !assignedThisWeek;
       sel.innerHTML = `
         <option value="">Inherit month</option>
         <option value="full">Full (8h)</option>
@@ -520,6 +557,7 @@ function renderCalendarTab() {
       }
 
       const weekNum = getWeekNumberForDate(dateObj, weeks);
+      const isWeekendDay = isWeekend(dateObj);
       let dayTotal = 0;
       const dotsWrap = document.createElement('div');
       dotsWrap.className = 'cal-dots';
@@ -528,7 +566,8 @@ function renderCalendarTab() {
       state.resourceList.forEach(resource => {
         const result = computeResourceDay(monthKey, resource.id, dateObj, weekNum);
         dayTotal += result.hours;
-        if (!holiday) {
+        const showDot = !holiday && (result.status === 'working' || !isWeekendDay);
+        if (showDot) {
           const dot = document.createElement('span');
           dot.className = 'dot';
           if (result.status === 'leave') dot.style.background = result.color || getResourceColor(resource.id);
@@ -698,12 +737,19 @@ function openDayModal(dateObj) {
     nameWrap.appendChild(document.createTextNode(resource.name));
     row.appendChild(nameWrap);
 
+    const leaveToggleWrap = document.createElement('label');
+    leaveToggleWrap.className = 'leave-toggle-wrap';
+    leaveToggleWrap.title = 'Mark this resource on leave for the day';
+    const leaveToggleLabel = document.createElement('span');
+    leaveToggleLabel.className = 'leave-toggle-label';
+    leaveToggleLabel.textContent = 'Leave';
     const leaveToggle = document.createElement('input');
     leaveToggle.type = 'checkbox';
     leaveToggle.className = 'leave-toggle';
-    leaveToggle.title = 'On leave';
     leaveToggle.checked = !!leaveEntry;
-    row.appendChild(leaveToggle);
+    leaveToggleWrap.appendChild(leaveToggleLabel);
+    leaveToggleWrap.appendChild(leaveToggle);
+    row.appendChild(leaveToggleWrap);
 
     const statusSelect = document.createElement('select');
     const existingDayOverride = monthData.resourceOverrides[resource.id] && monthData.resourceOverrides[resource.id].dayOverrides[dateStr];
@@ -729,7 +775,8 @@ function openDayModal(dateObj) {
     extraWrap.hidden = !leaveToggle.checked;
     const leaveLabelInput = document.createElement('input');
     leaveLabelInput.type = 'text';
-    leaveLabelInput.placeholder = 'Leave label (e.g. Sick leave)';
+    leaveLabelInput.placeholder = 'Leave label (required, e.g. Sick leave)';
+    leaveLabelInput.required = true;
     leaveLabelInput.value = leaveEntry ? leaveEntry.label : '';
     const leaveColorInput = document.createElement('input');
     leaveColorInput.type = 'color';
@@ -825,6 +872,17 @@ function openDayModal(dateObj) {
 }
 
 function saveDayModal({ monthKey, dateStr, holidayCheckbox, holidayLabelInput, rowControls }) {
+  if (!holidayCheckbox.checked) {
+    for (const rc of rowControls) {
+      if (rc.isUnbillable || !rc.leaveToggle) continue;
+      if (rc.leaveToggle.checked && !rc.leaveLabelInput.value.trim()) {
+        rc.leaveLabelInput.focus();
+        showToast(`Add a leave label for ${rc.resource.name}`);
+        return;
+      }
+    }
+  }
+
   const monthData = getMonthData(monthKey);
 
   if (holidayCheckbox.checked) {
@@ -885,7 +943,6 @@ function closeModal() {
  */
 function computeProjectedTotal(fromDateStr, percent) {
   const monthKey = getCurrentMonthKey();
-  const monthData = getMonthData(monthKey);
   const weeks = buildCalendarWeeks(currentYear, currentMonth);
   const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
   let total = 0;
@@ -902,11 +959,10 @@ function computeProjectedTotal(fromDateStr, percent) {
       continue;
     }
 
-    if (isWeekend(dateObj) || monthData.holidays[dateStr]) continue;
+    if (isWeekend(dateObj)) continue;
 
     state.resourceList.forEach(resource => {
-      const leaveEntry = monthData.leaves[dateStr] && monthData.leaves[dateStr][resource.id];
-      if (leaveEntry) return;
+      if (!isResourceEligibleForBulkAdjust(monthKey, resource, dateStr, weekNum)) return;
       const billingType = resolveBillingType(monthKey, resource.id, dateStr, weekNum);
       const base = billingType === 'full' ? 8 : 4;
       const delta = base * (percent - 100) / 100;
@@ -916,6 +972,10 @@ function computeProjectedTotal(fromDateStr, percent) {
   return total;
 }
 
+// Remembers the last date/percent chosen in the bulk-adjust modal so reopening it doesn't reset the view.
+let bulkAdjustLastFromDate = null;
+let bulkAdjustLastPercent = 100;
+
 function openBulkAdjustModal() {
   const monthKey = getCurrentMonthKey();
   const monthData = getMonthData(monthKey);
@@ -923,6 +983,9 @@ function openBulkAdjustModal() {
   const monthStartStr = dateKeyFromParts(currentYear, currentMonth, 1);
   const monthEndStr = dateKeyFromParts(currentYear, currentMonth, daysInMonth);
   const targetTotal = Number(monthData.target.baseHours || 0) + Number(monthData.target.additionalHours || 0);
+
+  const defaultFromDate = (today >= new Date(currentYear, currentMonth, 1) && today <= new Date(currentYear, currentMonth, daysInMonth))
+    ? dateKeyFromDate(today) : monthStartStr;
 
   const modalRoot = document.getElementById('modalRoot');
   modalRoot.innerHTML = '';
@@ -942,8 +1005,7 @@ function openBulkAdjustModal() {
   fromInput.type = 'date';
   fromInput.min = monthStartStr;
   fromInput.max = monthEndStr;
-  fromInput.value = (today >= new Date(currentYear, currentMonth, 1) && today <= new Date(currentYear, currentMonth, daysInMonth))
-    ? dateKeyFromDate(today) : monthStartStr;
+  fromInput.value = bulkAdjustLastFromDate || defaultFromDate;
   fromLabel.appendChild(fromInput);
   card.appendChild(fromLabel);
 
@@ -958,14 +1020,18 @@ function openBulkAdjustModal() {
   slider.min = '50';
   slider.max = '150';
   slider.step = '3.125';
-  slider.value = '100';
+  slider.value = String(bulkAdjustLastPercent);
   const sliderReadout = document.createElement('span');
   sliderReadout.className = 'adjust-readout';
-  sliderReadout.textContent = '100%';
+  sliderReadout.textContent = bulkAdjustLastPercent + '%';
   sliderWrap.appendChild(sliderLabel);
   sliderWrap.appendChild(slider);
   sliderWrap.appendChild(sliderReadout);
   card.appendChild(sliderWrap);
+
+  const tileGrid = document.createElement('div');
+  tileGrid.className = 'bulk-tile-grid';
+  card.appendChild(tileGrid);
 
   const preview = document.createElement('div');
   preview.className = 'bulk-preview';
@@ -973,25 +1039,64 @@ function openBulkAdjustModal() {
 
   function refreshPreview() {
     const percent = parseFloat(slider.value);
+    const isAdjusted = percent !== 100;
     sliderReadout.textContent = percent.toFixed(3).replace(/\.?0+$/, '') + '%';
-    const fullHours = Math.max(0, roundToQuarter(8 * (1 + (percent - 100) / 100)));
-    const partialHours = Math.max(0, roundToQuarter(4 * (1 + (percent - 100) / 100)));
+
+    const fromDateLabel = formatShortDate(new Date(fromInput.value + 'T00:00:00'));
+    const fullHoursNew = Math.max(0, roundToQuarter(8 * (1 + (percent - 100) / 100)));
+    const partialHoursNew = Math.max(0, roundToQuarter(4 * (1 + (percent - 100) / 100)));
+
+    const tiles = [
+      { label: 'Full day', value: '8h', sub: isAdjusted ? `Until ${fromDateLabel}` : 'Applies all month' },
+      { label: 'Partial day', value: '4h', sub: isAdjusted ? `Until ${fromDateLabel}` : 'Applies all month' }
+    ];
+    if (isAdjusted) {
+      tiles.push({ label: 'Full day (new)', value: `${fullHoursNew}h`, sub: `From ${fromDateLabel}` });
+      tiles.push({ label: 'Partial day (new)', value: `${partialHoursNew}h`, sub: `From ${fromDateLabel}` });
+    }
+    tileGrid.innerHTML = tiles.map(t => `
+      <div class="summary-card bulk-tile">
+        <div class="label">${t.label}</div>
+        <div class="value">${t.value}</div>
+        <div class="sublabel">${t.sub}</div>
+      </div>
+    `).join('');
+
     const projectedTotal = computeProjectedTotal(fromInput.value, percent);
     const diff = projectedTotal - targetTotal;
     preview.innerHTML = `
-      <div class="bulk-preview-row"><span>Full day becomes</span><strong>${fullHours}h</strong></div>
-      <div class="bulk-preview-row"><span>Partial day becomes</span><strong>${partialHours}h</strong></div>
       <div class="bulk-preview-row"><span>Projected month total</span><strong>${projectedTotal}h</strong></div>
       <div class="bulk-preview-row ${diff >= 0 ? 'positive' : 'negative'}"><span>Vs. target (${targetTotal}h)</span><strong>${diff >= 0 ? '+' : ''}${diff}h</strong></div>
     `;
   }
 
-  slider.addEventListener('input', refreshPreview);
-  fromInput.addEventListener('change', refreshPreview);
+  slider.addEventListener('input', () => {
+    bulkAdjustLastPercent = parseFloat(slider.value);
+    refreshPreview();
+  });
+  fromInput.addEventListener('change', () => {
+    bulkAdjustLastFromDate = fromInput.value;
+    refreshPreview();
+  });
   refreshPreview();
 
   const actions = document.createElement('div');
   actions.className = 'modal-actions';
+
+  const resetBtn = document.createElement('button');
+  resetBtn.className = 'ghost-btn';
+  resetBtn.style.color = 'var(--ink)';
+  resetBtn.style.borderColor = 'var(--border-strong)';
+  resetBtn.style.marginRight = 'auto';
+  resetBtn.textContent = 'Reset';
+  resetBtn.addEventListener('click', () => {
+    slider.value = '100';
+    fromInput.value = defaultFromDate;
+    bulkAdjustLastPercent = 100;
+    bulkAdjustLastFromDate = defaultFromDate;
+    refreshPreview();
+  });
+
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'ghost-btn';
   cancelBtn.style.color = 'var(--ink)';
@@ -1004,6 +1109,7 @@ function openBulkAdjustModal() {
   applyBtn.addEventListener('click', () => {
     applyBulkAdjust(fromInput.value, parseFloat(slider.value));
   });
+  actions.appendChild(resetBtn);
   actions.appendChild(cancelBtn);
   actions.appendChild(applyBtn);
   card.appendChild(actions);
@@ -1014,7 +1120,6 @@ function openBulkAdjustModal() {
 
 function applyBulkAdjust(fromDateStr, percent) {
   const monthKey = getCurrentMonthKey();
-  const monthData = getMonthData(monthKey);
   const weeks = buildCalendarWeeks(currentYear, currentMonth);
   const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
   let affectedDays = 0;
@@ -1022,14 +1127,13 @@ function applyBulkAdjust(fromDateStr, percent) {
   for (let day = 1; day <= daysInMonth; day++) {
     const dateObj = new Date(currentYear, currentMonth, day);
     const dateStr = dateKeyFromDate(dateObj);
-    if (dateStr < fromDateStr) continue;
-    if (isWeekend(dateObj) || monthData.holidays[dateStr]) continue;
+    if (dateStr < fromDateStr || isWeekend(dateObj)) continue;
     const weekNum = getWeekNumberForDate(dateObj, weeks);
-    affectedDays++;
+    let dayHadEligibleResource = false;
 
     state.resourceList.forEach(resource => {
-      const leaveEntry = monthData.leaves[dateStr] && monthData.leaves[dateStr][resource.id];
-      if (leaveEntry) return;
+      if (!isResourceEligibleForBulkAdjust(monthKey, resource, dateStr, weekNum)) return;
+      dayHadEligibleResource = true;
       const override = getResourceOverride(monthKey, resource.id);
       const billingType = resolveBillingType(monthKey, resource.id, dateStr, weekNum);
       const base = billingType === 'full' ? 8 : 4;
@@ -1037,6 +1141,8 @@ function applyBulkAdjust(fromDateStr, percent) {
       if (delta === 0) delete override.dayAdjustments[dateStr];
       else override.dayAdjustments[dateStr] = delta;
     });
+
+    if (dayHadEligibleResource) affectedDays++;
   }
 
   saveState();
@@ -1075,7 +1181,8 @@ function renderLeavesTab() {
   const monthData = getMonthData(monthKey);
 
   const resourceSelect = document.getElementById('leaveResourceSelect');
-  resourceSelect.innerHTML = state.resourceList.map(r => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join('');
+  const activeResourceList = state.resourceList.filter(r => isResourceActiveInMonth(r, currentYear, currentMonth));
+  resourceSelect.innerHTML = activeResourceList.map(r => `<option value="${r.id}">${escapeHtml(r.name)}</option>`).join('');
 
   renderLeaveColorPicker();
 
@@ -1095,7 +1202,7 @@ function renderLeavesTab() {
   Object.keys(monthData.leaves).sort().forEach(dateStr => {
     Object.keys(monthData.leaves[dateStr]).forEach(resourceId => {
       const resource = state.resourceList.find(r => r.id === resourceId);
-      if (!resource) return;
+      if (!resource || !isResourceActiveInMonth(resource, currentYear, currentMonth)) return;
       leaveRows.push({ dateStr, resourceId, resourceName: resource.name, entry: monthData.leaves[dateStr][resourceId] });
     });
   });
@@ -1248,6 +1355,10 @@ function renderCalcTab() {
     card.innerHTML = `<div class="label">${c.label}</div><div class="value">${c.value}</div>`;
     summaryCards.appendChild(card);
   });
+  const summaryColumns = Math.ceil(cards.length / 2);
+  summaryCards.style.gridTemplateColumns = window.innerWidth > 700
+    ? `repeat(${summaryColumns}, minmax(150px, 1fr))`
+    : '';
 
   renderDailyHoursChart(capacity, targetTotal);
   renderCompositionChart(capacity);
@@ -1277,6 +1388,7 @@ function renderCalcTab() {
   matrixHead.innerHTML = '<th>Resource</th>' + weekNumbers.map(w => `<th class="num">Week ${w}</th>`).join('') + '<th class="num">Total</th>';
   matrixBody.innerHTML = '';
   state.resourceList.forEach(resource => {
+    if (!isResourceActiveInMonth(resource, currentYear, currentMonth)) return;
     let resourceTotal = 0;
     const cells = weekNumbers.map(w => {
       const val = capacity.resourceWeekTotals[resource.id][w] || 0;
@@ -1461,7 +1573,7 @@ document.getElementById('importFileInput').addEventListener('change', e => {
    INIT
    ========================================================= */
 
-const THEME_STORAGE_KEY = 'resourcePlannerTheme';
+const THEME_STORAGE_KEY = 'capacityLedgerTheme';
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);

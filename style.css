@@ -507,6 +507,14 @@ select:focus {
   flex-wrap: wrap;
 }
 
+.resource-card-top.is-inactive-period {
+  opacity: 0.45;
+}
+
+.week-toggle.is-inactive-period {
+  opacity: 0.45;
+}
+
 .resource-dot {
   width: 12px;
   height: 12px;
@@ -919,12 +927,33 @@ select:focus {
   margin-top: 5px;
 }
 
+.summary-card .sublabel {
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  margin-top: 3px;
+}
+
 .summary-card.positive .value {
   color: var(--full);
 }
 
 .summary-card.negative .value {
   color: var(--leave);
+}
+
+.bulk-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.bulk-tile {
+  padding: 12px 14px;
+}
+
+.bulk-tile .value {
+  font-size: 20px;
 }
 
 .chart-grid {
@@ -1115,6 +1144,21 @@ select:focus {
   accent-color: var(--leave);
   cursor: pointer;
   flex-shrink: 0;
+}
+
+.leave-toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.leave-toggle-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-soft);
+  white-space: nowrap;
 }
 
 .resource-day-name.is-disabled {
