@@ -1420,12 +1420,16 @@ function renderDailyHoursChart(capacity, targetTotal) {
   let bars = '';
   dayList.forEach((d, i) => {
     const x = padLeft + i * slot;
-    const barH = maxHours > 0 ? (d.total / maxHours) * plotH : 0;
-    const y = padTop + (plotH - barH);
-    let fill = 'var(--brand)';
-    if (d.isHoliday) fill = 'var(--holiday)';
-    else if (d.isWeekend) fill = 'var(--weekend)';
-    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${Math.max(barH, 1).toFixed(1)}" rx="2" fill="${fill}"><title>${formatShortDate(d.dateObj)}: ${d.total}h</title></rect>`;
+    let yCursor = padTop + plotH;
+    const weekNum = getWeekNumberForDate(d.dateObj, capacity.weeks);
+
+    state.resourceList.forEach(resource => {
+      const result = computeResourceDay(capacity.monthKey, resource.id, d.dateObj, weekNum);
+      if (result.hours <= 0) return;
+      const segH = maxHours > 0 ? (result.hours / maxHours) * plotH : 0;
+      yCursor -= segH;
+      bars += `<rect x="${x.toFixed(1)}" y="${yCursor.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${segH.toFixed(1)}" fill="${getResourceColor(resource.id)}"><title>${escapeHtml(resource.name)} — ${formatShortDate(d.dateObj)}: ${result.hours}h</title></rect>`;
+    });
   });
 
   let refLine = '';
