@@ -1,187 +1,219 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Capacity Ledger — Monthly Billing Hours Planner</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
-</head>
-<body>
-<div id="app">
 
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">⏱</span>
-      <div class="brand-text">
-        <h1>Capacity Ledger</h1>
-        <p>Billable hours planning &amp; tracking</p>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resource Planner — Monthly Billing Hours Planner</title>
+    <link rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%8F%B1%3C/text%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap"
+      rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+  </head>
+
+  <body>
+    <div id="app">
+
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">⏱</span>
+          <div class="brand-text">
+            <h1>Resource Planner</h1>
+            <p>Billable hours planning &amp; tracking</p>
+          </div>
+        </div>
+
+        <div class="month-nav" role="group" aria-label="Month navigation">
+          <button type="button" class="icon-btn" id="prevMonthBtn" aria-label="Previous month">&#8249;</button>
+          <input type="month" id="monthPicker" class="month-input">
+          <button type="button" class="icon-btn" id="nextMonthBtn" aria-label="Next month">&#8250;</button>
+          <button type="button" class="ghost-btn" id="todayBtn">Today</button>
+        </div>
+
+        <div class="header-actions">
+          <button type="button" class="icon-btn theme-toggle" id="themeToggleBtn"
+            aria-label="Toggle dark mode">🌙</button>
+          <button type="button" class="ghost-btn" id="exportBtn">Export data</button>
+          <button type="button" class="ghost-btn" id="importBtn">Import data</button>
+          <input type="file" id="importFileInput" accept="application/json" hidden>
+        </div>
+      </header>
+
+      <div class="layout">
+        <nav class="tabrail" role="tablist" aria-label="Sections">
+          <button class="tab-btn active" data-tab="resources" role="tab" aria-selected="true">
+            <span class="tab-icon" aria-hidden="true">👤</span><span>Resources</span>
+          </button>
+          <button class="tab-btn" data-tab="calendar" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">🗓</span><span>Calendar</span>
+          </button>
+          <button class="tab-btn" data-tab="leaves" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">🏷</span><span>Leaves &amp; Holidays</span>
+          </button>
+          <button class="tab-btn" data-tab="calc" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">Σ</span><span>Calculations</span>
+          </button>
+        </nav>
+
+        <main class="content">
+
+          <section id="tab-resources" class="tab-panel active" role="tabpanel">
+            <div class="panel-header">
+              <h2>Resources</h2>
+              <p class="panel-sub">Add everyone on the project — including yourself. Set each person's default billing
+                for <span id="resourcesMonthLabel" class="month-chip"></span>, then fine-tune by week below.</p>
+            </div>
+
+            <form id="addResourceForm" class="inline-form">
+              <input type="text" id="newResourceName" placeholder="Resource name, e.g. Sameer" required>
+              <button type="submit" class="primary-btn">Add resource</button>
+            </form>
+
+            <div id="resourceList" class="resource-list"></div>
+            <p id="resourceEmptyState" class="empty-state" hidden>No resources yet. Add your first team member above.
+            </p>
+          </section>
+
+          <section id="tab-calendar" class="tab-panel" role="tabpanel">
+            <div class="panel-header">
+              <h2>Calendar</h2>
+              <p class="panel-sub">Expected billable hours per day for <span id="calendarMonthLabel"
+                  class="month-chip"></span>. Click a weekday to adjust billing, mark leave, or tag a holiday.</p>
+            </div>
+            <div class="calendar-legend">
+              <span class="legend-item"><i class="dot dot-full"></i>Full day</span>
+              <span class="legend-item"><i class="dot dot-partial"></i>Partial day</span>
+              <span class="legend-item"><i class="dot dot-leave"></i>On leave</span>
+              <span class="legend-item"><i class="dot dot-holiday"></i>Holiday</span>
+              <span class="legend-item"><i class="dot dot-weekend"></i>Weekend</span>
+            </div>
+            <div id="calendarGrid" class="calendar-grid"></div>
+          </section>
+
+          <section id="tab-leaves" class="tab-panel" role="tabpanel">
+            <div class="panel-header">
+              <h2>Leaves &amp; Holidays</h2>
+              <p class="panel-sub">Track time off for <span id="leavesMonthLabel" class="month-chip"></span>. Leave
+                zeroes a resource's hours for that day; a holiday zeroes hours for everyone.</p>
+            </div>
+
+            <div class="split-panels">
+              <div class="split-panel">
+                <h3>Leaves</h3>
+                <form id="addLeaveForm" class="stacked-form">
+                  <label>Resource
+                    <select id="leaveResourceSelect" required></select>
+                  </label>
+                  <div class="form-row">
+                    <label>From
+                      <input type="date" id="leaveStartDate" required>
+                    </label>
+                    <label>To
+                      <input type="date" id="leaveEndDate" required>
+                    </label>
+                  </div>
+                  <label>Label
+                    <input type="text" id="leaveLabel" placeholder="e.g. Sick leave, Vacation" required>
+                  </label>
+                  <label>Tag colour
+                    <div class="color-picker" id="leaveColorPicker"></div>
+                  </label>
+                  <button type="submit" class="primary-btn">Add leave</button>
+                </form>
+                <div id="leaveList" class="tag-list"></div>
+                <p id="leaveEmptyState" class="empty-state" hidden>No leaves logged for this month.</p>
+              </div>
+
+              <div class="split-panel">
+                <h3>Public holidays</h3>
+                <form id="addHolidayForm" class="stacked-form">
+                  <label>Date
+                    <input type="date" id="holidayDate" required>
+                  </label>
+                  <label>Label
+                    <input type="text" id="holidayLabel" placeholder="e.g. Independence Day" required>
+                  </label>
+                  <button type="submit" class="primary-btn">Add holiday</button>
+                </form>
+                <div id="holidayList" class="tag-list"></div>
+                <p id="holidayEmptyState" class="empty-state" hidden>No holidays tagged for this month.</p>
+              </div>
+            </div>
+          </section>
+
+          <section id="tab-calc" class="tab-panel" role="tabpanel">
+            <div class="panel-header">
+              <h2>Calculations</h2>
+              <p class="panel-sub">Target vs. planned capacity for <span id="calcMonthLabel" class="month-chip"></span>.
+              </p>
+            </div>
+
+            <div class="target-form">
+              <label>Base target hours
+                <input type="number" id="baseTargetInput" min="0" step="1">
+              </label>
+              <label>Additional hours
+                <input type="number" id="additionalTargetInput" min="0" step="1">
+              </label>
+              <div class="target-readout">
+                <span class="readout-label">Target</span>
+                <span class="readout-value" id="targetTotalReadout">0</span>
+                <span class="readout-label">rounds to</span>
+                <span class="readout-value" id="targetRoundedReadout">0</span>
+              </div>
+              <button type="button" class="primary-btn" id="bulkAdjustBtn">Adjust effort to hit target</button>
+            </div>
+
+            <div class="summary-cards" id="summaryCards"></div>
+
+            <div class="chart-grid">
+              <div class="chart-card">
+                <h3 class="section-title tight">Daily hours trend</h3>
+                <div id="dailyHoursChart" class="chart-surface"></div>
+              </div>
+              <div class="chart-card chart-card-narrow">
+                <h3 class="section-title tight">Day composition</h3>
+                <div id="compositionChart" class="chart-surface"></div>
+              </div>
+            </div>
+
+            <h3 class="section-title">Weekly breakdown</h3>
+            <table class="data-table" id="weeklyTable">
+              <thead>
+                <tr>
+                  <th>Week</th>
+                  <th>Dates</th>
+                  <th class="num">Planned hours</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+              <tfoot></tfoot>
+            </table>
+
+            <h3 class="section-title">Resource &times; week matrix</h3>
+            <div class="table-scroll">
+              <table class="data-table" id="matrixTable">
+                <thead>
+                  <tr></tr>
+                </thead>
+                <tbody></tbody>
+                <tfoot></tfoot>
+              </table>
+            </div>
+          </section>
+
+        </main>
       </div>
     </div>
 
-    <div class="month-nav" role="group" aria-label="Month navigation">
-      <button type="button" class="icon-btn" id="prevMonthBtn" aria-label="Previous month">&#8249;</button>
-      <input type="month" id="monthPicker" class="month-input">
-      <button type="button" class="icon-btn" id="nextMonthBtn" aria-label="Next month">&#8250;</button>
-      <button type="button" class="ghost-btn" id="todayBtn">Today</button>
-    </div>
+    <div id="modalRoot" class="modal-root" hidden></div>
+    <div id="toastRoot" class="toast-root" aria-live="polite"></div>
 
-    <div class="header-actions">
-      <button type="button" class="ghost-btn" id="exportBtn">Export data</button>
-      <button type="button" class="ghost-btn" id="importBtn">Import data</button>
-      <input type="file" id="importFileInput" accept="application/json" hidden>
-    </div>
-  </header>
+    <script src="app.js"></script>
+  </body>
 
-  <div class="layout">
-    <nav class="tabrail" role="tablist" aria-label="Sections">
-      <button class="tab-btn active" data-tab="resources" role="tab" aria-selected="true">
-        <span class="tab-icon" aria-hidden="true">👤</span><span>Resources</span>
-      </button>
-      <button class="tab-btn" data-tab="calendar" role="tab" aria-selected="false">
-        <span class="tab-icon" aria-hidden="true">🗓</span><span>Calendar</span>
-      </button>
-      <button class="tab-btn" data-tab="leaves" role="tab" aria-selected="false">
-        <span class="tab-icon" aria-hidden="true">🏷</span><span>Leaves &amp; Holidays</span>
-      </button>
-      <button class="tab-btn" data-tab="calc" role="tab" aria-selected="false">
-        <span class="tab-icon" aria-hidden="true">Σ</span><span>Calculations</span>
-      </button>
-    </nav>
-
-    <main class="content">
-
-      <section id="tab-resources" class="tab-panel active" role="tabpanel">
-        <div class="panel-header">
-          <h2>Resources</h2>
-          <p class="panel-sub">Add everyone on the project — including yourself. Set each person's default billing for <span id="resourcesMonthLabel" class="month-chip"></span>, then fine-tune by week below.</p>
-        </div>
-
-        <form id="addResourceForm" class="inline-form">
-          <input type="text" id="newResourceName" placeholder="Resource name, e.g. Bhaskar" required>
-          <button type="submit" class="primary-btn">Add resource</button>
-        </form>
-
-        <div id="resourceList" class="resource-list"></div>
-        <p id="resourceEmptyState" class="empty-state" hidden>No resources yet. Add your first team member above.</p>
-      </section>
-
-      <section id="tab-calendar" class="tab-panel" role="tabpanel">
-        <div class="panel-header">
-          <h2>Calendar</h2>
-          <p class="panel-sub">Expected billable hours per day for <span id="calendarMonthLabel" class="month-chip"></span>. Click a weekday to adjust billing, mark leave, or tag a holiday.</p>
-        </div>
-        <div class="calendar-legend">
-          <span class="legend-item"><i class="dot dot-full"></i>Full day</span>
-          <span class="legend-item"><i class="dot dot-partial"></i>Partial day</span>
-          <span class="legend-item"><i class="dot dot-leave"></i>On leave</span>
-          <span class="legend-item"><i class="dot dot-holiday"></i>Holiday</span>
-          <span class="legend-item"><i class="dot dot-weekend"></i>Weekend</span>
-        </div>
-        <div id="calendarGrid" class="calendar-grid"></div>
-      </section>
-
-      <section id="tab-leaves" class="tab-panel" role="tabpanel">
-        <div class="panel-header">
-          <h2>Leaves &amp; Holidays</h2>
-          <p class="panel-sub">Track time off for <span id="leavesMonthLabel" class="month-chip"></span>. Leave zeroes a resource's hours for that day; a holiday zeroes hours for everyone.</p>
-        </div>
-
-        <div class="split-panels">
-          <div class="split-panel">
-            <h3>Leaves</h3>
-            <form id="addLeaveForm" class="stacked-form">
-              <label>Resource
-                <select id="leaveResourceSelect" required></select>
-              </label>
-              <div class="form-row">
-                <label>From
-                  <input type="date" id="leaveStartDate" required>
-                </label>
-                <label>To
-                  <input type="date" id="leaveEndDate" required>
-                </label>
-              </div>
-              <label>Label
-                <input type="text" id="leaveLabel" placeholder="e.g. Sick leave, Vacation" required>
-              </label>
-              <label>Tag colour
-                <div class="color-picker" id="leaveColorPicker"></div>
-              </label>
-              <button type="submit" class="primary-btn">Add leave</button>
-            </form>
-            <div id="leaveList" class="tag-list"></div>
-            <p id="leaveEmptyState" class="empty-state" hidden>No leaves logged for this month.</p>
-          </div>
-
-          <div class="split-panel">
-            <h3>Public holidays</h3>
-            <form id="addHolidayForm" class="stacked-form">
-              <label>Date
-                <input type="date" id="holidayDate" required>
-              </label>
-              <label>Label
-                <input type="text" id="holidayLabel" placeholder="e.g. Independence Day" required>
-              </label>
-              <button type="submit" class="primary-btn">Add holiday</button>
-            </form>
-            <div id="holidayList" class="tag-list"></div>
-            <p id="holidayEmptyState" class="empty-state" hidden>No holidays tagged for this month.</p>
-          </div>
-        </div>
-      </section>
-
-      <section id="tab-calc" class="tab-panel" role="tabpanel">
-        <div class="panel-header">
-          <h2>Calculations</h2>
-          <p class="panel-sub">Target vs. planned capacity for <span id="calcMonthLabel" class="month-chip"></span>.</p>
-        </div>
-
-        <div class="target-form">
-          <label>Base target hours
-            <input type="number" id="baseTargetInput" min="0" step="1">
-          </label>
-          <label>Additional hours
-            <input type="number" id="additionalTargetInput" min="0" step="1">
-          </label>
-          <div class="target-readout">
-            <span class="readout-label">Target</span>
-            <span class="readout-value" id="targetTotalReadout">0</span>
-            <span class="readout-label">rounds to</span>
-            <span class="readout-value" id="targetRoundedReadout">0</span>
-          </div>
-        </div>
-
-        <div class="summary-cards" id="summaryCards"></div>
-
-        <h3 class="section-title">Weekly breakdown</h3>
-        <table class="data-table" id="weeklyTable">
-          <thead>
-            <tr><th>Week</th><th>Dates</th><th class="num">Planned hours</th></tr>
-          </thead>
-          <tbody></tbody>
-          <tfoot></tfoot>
-        </table>
-
-        <h3 class="section-title">Resource &times; week matrix</h3>
-        <div class="table-scroll">
-          <table class="data-table" id="matrixTable">
-            <thead><tr></tr></thead>
-            <tbody></tbody>
-            <tfoot></tfoot>
-          </table>
-        </div>
-      </section>
-
-    </main>
-  </div>
-</div>
-
-<div id="modalRoot" class="modal-root" hidden></div>
-<div id="toastRoot" class="toast-root" aria-live="polite"></div>
-
-<script src="app.js"></script>
-</body>
 </html>

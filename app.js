@@ -4,7 +4,7 @@
    STATE
    ========================================================= */
 
-const STORAGE_KEY = 'capacityLedgerState_v1';
+const STORAGE_KEY = 'resourcePlannerState_v1';
 const RESOURCE_COLORS = ['#2B3A67', '#1F9D8A', '#D98E2B', '#D9556B', '#6D5DAB', '#3A8FB7', '#B7772E', '#4E8C5E'];
 
 let state = loadState();
@@ -56,9 +56,21 @@ function getMonthData(monthKey) {
 function getResourceOverride(monthKey, resourceId) {
   const monthData = getMonthData(monthKey);
   if (!monthData.resourceOverrides[resourceId]) {
-    monthData.resourceOverrides[resourceId] = { month: 'full', weekOverrides: {}, dayOverrides: {} };
+    monthData.resourceOverrides[resourceId] = {
+      month: 'full', weekOverrides: {}, dayOverrides: {}, dayAdjustments: {},
+      unbillableMonth: false, unbillableWeeks: {}
+    };
   }
-  return monthData.resourceOverrides[resourceId];
+  const override = monthData.resourceOverrides[resourceId];
+  if (!override.dayAdjustments) override.dayAdjustments = {}; // back-fill for data saved before this feature
+  if (override.unbillableMonth === undefined) override.unbillableMonth = false;
+  if (!override.unbillableWeeks) override.unbillableWeeks = {};
+  return override;
+}
+
+/** Step size for the daily hour slider: 0.25h (15 min) on full-billed days, 0.125h on partial-billed days. */
+function getAdjustmentStep(billingType) {
+  return billingType === 'full' ? 0.25 : 0.125;
 }
 
 function getResourceColor(resourceId) {
@@ -140,22 +152,59 @@ function resolveBillingType(monthKey, resourceId, dateStr, weekNum) {
 function computeResourceDay(monthKey, resourceId, dateObj, weekNum) {
   const dateStr = dateKeyFromDate(dateObj);
   const monthData = getMonthData(monthKey);
+  const override = getResourceOverride(monthKey, resourceId);
 
-  if (isWeekend(dateObj)) return { status: 'weekend', hours: 0 };
+  const resourceObj = state.resourceList.find(r => r.id === resourceId);
+  if (resourceObj && !isResourceAssigned(resourceObj, dateStr)) return { status: 'unassigned', hours: 0 };
 
   const holiday = monthData.holidays[dateStr];
   if (holiday) return { status: 'holiday', hours: 0, label: holiday.label };
 
+  if (isResourceUnbillable(monthKey, resourceId, weekNum)) return { status: 'unbillable', hours: 0 };
+
   const leaveEntry = monthData.leaves[dateStr] && monthData.leaves[dateStr][resourceId];
   if (leaveEntry) return { status: 'leave', hours: 0, label: leaveEntry.label, color: leaveEntry.color };
 
+  if (isWeekend(dateObj)) {
+    const weekendOverride = override.dayOverrides[dateStr]; // undefined = no overtime worked, the default
+    if (!weekendOverride) return { status: 'weekend', hours: 0 };
+    const baseHours = weekendOverride === 'full' ? 8 : 4;
+    const adjustment = override.dayAdjustments[dateStr] || 0;
+    const hours = Math.max(0, roundToQuarter(baseHours + adjustment));
+    return { status: 'working', hours, billingType: weekendOverride, baseHours, adjustment };
+  }
+
   const billingType = resolveBillingType(monthKey, resourceId, dateStr, weekNum);
-  return { status: 'working', hours: billingType === 'full' ? 8 : 4, billingType };
+  const baseHours = billingType === 'full' ? 8 : 4;
+  const adjustment = override.dayAdjustments[dateStr] || 0;
+  const hours = Math.max(0, roundToQuarter(baseHours + adjustment));
+  return { status: 'working', hours, billingType, baseHours, adjustment };
+}
+
+/** True if the resource has no start/end date set (blank = indefinite), or dateStr falls within them. */
+function isResourceAssigned(resourceObj, dateStr) {
+  if (resourceObj.startDate && dateStr < resourceObj.startDate) return false;
+  if (resourceObj.endDate && dateStr > resourceObj.endDate) return false;
+  return true;
+}
+
+/** True if the resource is marked unbillable for the whole month, or for this specific week. */
+function isResourceUnbillable(monthKey, resourceId, weekNum) {
+  const override = getResourceOverride(monthKey, resourceId);
+  if (override.unbillableMonth) return true;
+  if (weekNum != null && override.unbillableWeeks[weekNum]) return true;
+  return false;
+}
+
+/** Avoids floating point drift (e.g. 8.1 + 0.25 = 8.099999...) when stacking 0.125-step adjustments. */
+function roundToQuarter(value) {
+  return Math.round(value * 1000) / 1000;
 }
 
 /** Aggregates hours for every in-month day, plus per-resource and per-week rollups. */
 function computeMonthCapacity(year, month) {
   const monthKey = getMonthKey(year, month);
+  const monthData = getMonthData(monthKey);
   const weeks = buildCalendarWeeks(year, month);
   const daysInMonth = new Date(year, month + 1, 0).getDate();
 
@@ -164,24 +213,41 @@ function computeMonthCapacity(year, month) {
   const resourceWeekTotals = {};
   state.resourceList.forEach(r => { resourceWeekTotals[r.id] = {}; });
 
+  let workingDayCount = 0;
+  let holidayCount = 0;
+  let leaveInstanceCount = 0;
+  let unbillableInstanceCount = 0;
+  const orderedDates = [];
+
   for (let day = 1; day <= daysInMonth; day++) {
     const dateObj = new Date(year, month, day);
     const dateStr = dateKeyFromDate(dateObj);
     const weekNum = getWeekNumberForDate(dateObj, weeks);
     let dayTotal = 0;
 
+    if (!isWeekend(dateObj)) {
+      if (monthData.holidays[dateStr]) holidayCount++;
+      else workingDayCount++;
+    }
+
     state.resourceList.forEach(resource => {
       const result = computeResourceDay(monthKey, resource.id, dateObj, weekNum);
       dayTotal += result.hours;
       resourceWeekTotals[resource.id][weekNum] = (resourceWeekTotals[resource.id][weekNum] || 0) + result.hours;
+      if (result.status === 'leave') leaveInstanceCount++;
+      if (result.status === 'unbillable') unbillableInstanceCount++;
     });
 
     dayTotals[dateStr] = dayTotal;
+    orderedDates.push({ dateObj, dateStr, total: dayTotal, isWeekend: isWeekend(dateObj), isHoliday: !!monthData.holidays[dateStr] });
     weekTotals[weekNum] = (weekTotals[weekNum] || 0) + dayTotal;
   }
 
   const grandTotal = Object.values(weekTotals).reduce((sum, v) => sum + v, 0);
-  return { weeks, dayTotals, weekTotals, resourceWeekTotals, grandTotal, monthKey };
+  return {
+    weeks, dayTotals, weekTotals, resourceWeekTotals, grandTotal, monthKey,
+    orderedDates, workingDayCount, holidayCount, leaveInstanceCount, unbillableInstanceCount
+  };
 }
 
 /* =========================================================
@@ -253,10 +319,19 @@ function renderResourcesTab() {
 
     const monthSelect = document.createElement('select');
     monthSelect.className = 'month-default-select';
-    monthSelect.innerHTML = `<option value="full">Full day (8h) default</option><option value="partial">Partial day (4h) default</option>`;
-    monthSelect.value = override.month;
+    monthSelect.innerHTML = `
+      <option value="full">Full day (8h) default</option>
+      <option value="partial">Partial day (4h) default</option>
+      <option value="unbillable">Unbillable this month</option>
+    `;
+    monthSelect.value = override.unbillableMonth ? 'unbillable' : override.month;
     monthSelect.addEventListener('change', () => {
-      override.month = monthSelect.value;
+      if (monthSelect.value === 'unbillable') {
+        override.unbillableMonth = true;
+      } else {
+        override.unbillableMonth = false;
+        override.month = monthSelect.value;
+      }
       saveState();
       renderCalendarTab();
       renderCalcTab();
@@ -281,6 +356,55 @@ function renderResourcesTab() {
 
     card.appendChild(top);
 
+    const assignRow = document.createElement('div');
+    assignRow.className = 'resource-assign-row';
+    const assignLabel = document.createElement('span');
+    assignLabel.className = 'assign-label';
+    assignLabel.textContent = 'Assigned';
+    assignRow.appendChild(assignLabel);
+
+    const startInput = document.createElement('input');
+    startInput.type = 'date';
+    startInput.value = resource.startDate || '';
+    startInput.setAttribute('aria-label', `${resource.name} start date`);
+    startInput.addEventListener('change', () => {
+      resource.startDate = startInput.value || null;
+      saveState();
+      renderCalendarTab();
+      renderCalcTab();
+    });
+    assignRow.appendChild(startInput);
+
+    const assignTo = document.createElement('span');
+    assignTo.className = 'assign-to';
+    assignTo.textContent = 'to';
+    assignRow.appendChild(assignTo);
+
+    const endInput = document.createElement('input');
+    endInput.type = 'date';
+    endInput.value = resource.endDate || '';
+    endInput.setAttribute('aria-label', `${resource.name} end date`);
+    endInput.addEventListener('change', () => {
+      endInput.setCustomValidity('');
+      if (startInput.value && endInput.value && endInput.value < startInput.value) {
+        endInput.setCustomValidity('End date must be on or after the start date');
+        endInput.reportValidity();
+        return;
+      }
+      resource.endDate = endInput.value || null;
+      saveState();
+      renderCalendarTab();
+      renderCalcTab();
+    });
+    assignRow.appendChild(endInput);
+
+    const assignHint = document.createElement('span');
+    assignHint.className = 'assign-hint';
+    assignHint.textContent = 'Leave blank for indefinite';
+    assignRow.appendChild(assignHint);
+
+    card.appendChild(assignRow);
+
     const weekRow = document.createElement('div');
     weekRow.className = 'resource-week-row';
     weeks.forEach((week, idx) => {
@@ -295,16 +419,28 @@ function renderResourcesTab() {
       wrap.appendChild(label);
 
       const sel = document.createElement('select');
-      sel.innerHTML = `<option value="">Inherit month</option><option value="full">Full (8h)</option><option value="partial">Partial (4h)</option>`;
-      sel.value = override.weekOverrides[weekNum] || '';
+      sel.innerHTML = `
+        <option value="">Inherit month</option>
+        <option value="full">Full (8h)</option>
+        <option value="partial">Partial (4h)</option>
+        <option value="unbillable">Unbillable</option>
+      `;
+      sel.value = override.unbillableWeeks[weekNum] ? 'unbillable' : (override.weekOverrides[weekNum] || '');
       sel.addEventListener('change', () => {
-        if (sel.value) override.weekOverrides[weekNum] = sel.value;
-        else delete override.weekOverrides[weekNum];
+        if (sel.value === 'unbillable') {
+          override.unbillableWeeks[weekNum] = true;
+          delete override.weekOverrides[weekNum];
+        } else {
+          delete override.unbillableWeeks[weekNum];
+          if (sel.value) override.weekOverrides[weekNum] = sel.value;
+          else delete override.weekOverrides[weekNum];
+        }
         saveState();
         renderCalendarTab();
         renderCalcTab();
       });
       wrap.appendChild(sel);
+
       weekRow.appendChild(wrap);
     });
     card.appendChild(weekRow);
@@ -372,8 +508,6 @@ function renderCalendarTab() {
         tag.className = 'cal-tag';
         tag.textContent = 'Weekend';
         cell.appendChild(tag);
-        grid.appendChild(cell);
-        return;
       }
 
       const holiday = monthData.holidays[dateStr];
@@ -398,6 +532,7 @@ function renderCalendarTab() {
           const dot = document.createElement('span');
           dot.className = 'dot';
           if (result.status === 'leave') dot.style.background = result.color || getResourceColor(resource.id);
+          else if (result.status === 'unbillable' || result.status === 'unassigned') dot.style.background = 'var(--ink-faint)';
           else if (result.status === 'working' && result.billingType === 'full') dot.style.background = 'var(--full)';
           else if (result.status === 'working') dot.style.background = 'var(--partial)';
           dotsWrap.appendChild(dot);
@@ -429,6 +564,9 @@ function renderCalendarTab() {
         const result = computeResourceDay(monthKey, resource.id, dateObj, weekNum);
         let line = `${resource.name}: `;
         if (result.status === 'leave') line += `On leave (${result.label || 'Leave'})`;
+        else if (result.status === 'unbillable') line += 'Unbillable this period';
+        else if (result.status === 'unassigned') line += 'Not assigned this period';
+        else if (result.status === 'weekend') line += 'Off (weekend)';
         else line += `${result.hours}h`;
         return line;
       });
@@ -451,6 +589,7 @@ function openDayModal(dateObj) {
   const weekNum = getWeekNumberForDate(dateObj, weeks);
   const monthData = getMonthData(monthKey);
   const existingHoliday = monthData.holidays[dateStr];
+  const isWeekendDay = isWeekend(dateObj);
 
   const modalRoot = document.getElementById('modalRoot');
   modalRoot.innerHTML = '';
@@ -482,6 +621,7 @@ function openDayModal(dateObj) {
     holidayLabelInput.hidden = !holidayCheckbox.checked;
     resourceRowsWrap.style.opacity = holidayCheckbox.checked ? '0.4' : '1';
     resourceRowsWrap.style.pointerEvents = holidayCheckbox.checked ? 'none' : 'auto';
+    masterWrap.hidden = holidayCheckbox.checked;
   });
   holidayWrap.appendChild(holidayCheckbox);
   holidayWrap.appendChild(holidayCheckLabel);
@@ -497,9 +637,52 @@ function openDayModal(dateObj) {
 
   const rowControls = [];
 
+  const masterWrap = document.createElement('div');
+  masterWrap.className = 'adjust-wrap master-adjust-wrap';
+  if (existingHoliday) masterWrap.hidden = true;
+  const masterLabel = document.createElement('span');
+  masterLabel.className = 'adjust-label';
+  masterLabel.textContent = 'All resources';
+  const masterSlider = document.createElement('input');
+  masterSlider.type = 'range';
+  masterSlider.min = '50';
+  masterSlider.max = '150';
+  masterSlider.step = '3.125';
+  masterSlider.value = '100';
+  const masterReadout = document.createElement('span');
+  masterReadout.className = 'adjust-readout';
+  masterReadout.textContent = '100%';
+  masterSlider.addEventListener('input', () => {
+    const percent = parseFloat(masterSlider.value);
+    masterReadout.textContent = percent.toFixed(3).replace(/\.?0+$/, '') + '%';
+    rowControls.forEach(({ isUnbillable, isRowInactive, adjustSlider, refreshAdjustUI, getEffectiveBillingType }) => {
+      if (isUnbillable || isRowInactive()) return;
+      const base = getEffectiveBillingType() === 'full' ? 8 : 4;
+      adjustSlider.value = String(roundToQuarter(base * (percent - 100) / 100));
+      refreshAdjustUI();
+    });
+  });
+  masterWrap.appendChild(masterLabel);
+  masterWrap.appendChild(masterSlider);
+  masterWrap.appendChild(masterReadout);
+  card.appendChild(masterWrap);
+
   state.resourceList.forEach(resource => {
     const result = computeResourceDay(monthKey, resource.id, dateObj, weekNum);
     const leaveEntry = monthData.leaves[dateStr] && monthData.leaves[dateStr][resource.id];
+
+    if (result.status === 'unbillable' || result.status === 'unassigned') {
+      const row = document.createElement('div');
+      row.className = 'unbillable-row';
+      const tagText = result.status === 'unbillable' ? 'Unbillable this week' : 'Not assigned this period';
+      row.innerHTML = `
+        <span class="resource-day-name">${escapeHtml(resource.name)}</span>
+        <span class="unbillable-tag">${tagText}</span>
+      `;
+      resourceRowsWrap.appendChild(row);
+      rowControls.push({ resource, isUnbillable: true });
+      return;
+    }
 
     const row = document.createElement('div');
     row.className = 'resource-day-row';
@@ -515,41 +698,106 @@ function openDayModal(dateObj) {
     nameWrap.appendChild(document.createTextNode(resource.name));
     row.appendChild(nameWrap);
 
+    const leaveToggle = document.createElement('input');
+    leaveToggle.type = 'checkbox';
+    leaveToggle.className = 'leave-toggle';
+    leaveToggle.title = 'On leave';
+    leaveToggle.checked = !!leaveEntry;
+    row.appendChild(leaveToggle);
+
     const statusSelect = document.createElement('select');
-    statusSelect.innerHTML = `
-      <option value="inherit">Inherit (${resolveBillingType(monthKey, resource.id, dateStr, weekNum) === 'full' ? 'Full' : 'Partial'})</option>
-      <option value="full">Full day (8h)</option>
-      <option value="partial">Partial day (4h)</option>
-      <option value="leave">On leave</option>
-    `;
-    if (result.status === 'leave') statusSelect.value = 'leave';
-    else if (monthData.resourceOverrides[resource.id] && monthData.resourceOverrides[resource.id].dayOverrides[dateStr]) {
-      statusSelect.value = monthData.resourceOverrides[resource.id].dayOverrides[dateStr];
+    const existingDayOverride = monthData.resourceOverrides[resource.id] && monthData.resourceOverrides[resource.id].dayOverrides[dateStr];
+    if (isWeekendDay) {
+      statusSelect.innerHTML = `
+        <option value="weekend">Weekend (no work)</option>
+        <option value="full">Full day (8h)</option>
+        <option value="partial">Partial day (4h)</option>
+      `;
+      statusSelect.value = existingDayOverride || 'weekend';
     } else {
-      statusSelect.value = 'inherit';
+      statusSelect.innerHTML = `
+        <option value="inherit">Inherit (${resolveBillingType(monthKey, resource.id, dateStr, weekNum) === 'full' ? 'Full' : 'Partial'})</option>
+        <option value="full">Full day (8h)</option>
+        <option value="partial">Partial day (4h)</option>
+      `;
+      statusSelect.value = existingDayOverride || 'inherit';
     }
     row.appendChild(statusSelect);
 
     const extraWrap = document.createElement('div');
     extraWrap.className = 'resource-day-extra';
-    extraWrap.hidden = statusSelect.value !== 'leave';
+    extraWrap.hidden = !leaveToggle.checked;
     const leaveLabelInput = document.createElement('input');
     leaveLabelInput.type = 'text';
     leaveLabelInput.placeholder = 'Leave label (e.g. Sick leave)';
     leaveLabelInput.value = leaveEntry ? leaveEntry.label : '';
     const leaveColorInput = document.createElement('input');
     leaveColorInput.type = 'color';
-    leaveColorInput.value = leaveEntry ? leaveEntry.color : getResourceColor(resource.id);
+    leaveColorInput.value = leaveEntry ? leaveEntry.color : LEAVE_COLORS[0];
     extraWrap.appendChild(leaveLabelInput);
     extraWrap.appendChild(leaveColorInput);
     row.appendChild(extraWrap);
 
-    statusSelect.addEventListener('change', () => {
-      extraWrap.hidden = statusSelect.value !== 'leave';
-    });
+    // Fine-tune slider: nudges the day's hours up/down in 0.25h (full-billed) or 0.125h (partial-billed) steps.
+    const adjustWrap = document.createElement('div');
+    adjustWrap.className = 'adjust-wrap';
+
+    const adjustLabel = document.createElement('span');
+    adjustLabel.className = 'adjust-label';
+    adjustLabel.textContent = 'Fine-tune';
+
+    const adjustSlider = document.createElement('input');
+    adjustSlider.type = 'range';
+    adjustSlider.min = '-4';
+    adjustSlider.max = '4';
+
+    const adjustReadout = document.createElement('span');
+    adjustReadout.className = 'adjust-readout';
+
+    function currentEffectiveBillingType() {
+      if (statusSelect.value === 'full') return 'full';
+      if (statusSelect.value === 'partial') return 'partial';
+      return resolveBillingType(monthKey, resource.id, dateStr, weekNum);
+    }
+
+    function isRowInactive() {
+      return leaveToggle.checked || (isWeekendDay && statusSelect.value === 'weekend');
+    }
+
+    function refreshAdjustUI() {
+      const billingType = currentEffectiveBillingType();
+      adjustSlider.step = String(getAdjustmentStep(billingType));
+      const base = billingType === 'full' ? 8 : 4;
+      const delta = parseFloat(adjustSlider.value) || 0;
+      adjustReadout.textContent = Math.max(0, roundToQuarter(base + delta)) + 'h';
+    }
+
+    function refreshRowState() {
+      const inactive = isRowInactive();
+      nameWrap.classList.toggle('is-disabled', inactive);
+      adjustWrap.classList.toggle('is-disabled', inactive);
+      adjustSlider.disabled = inactive;
+      statusSelect.disabled = leaveToggle.checked;
+      extraWrap.hidden = !leaveToggle.checked;
+      refreshAdjustUI();
+    }
+
+    adjustSlider.value = String(result.status === 'working' ? (result.adjustment || 0) : 0);
+    adjustSlider.addEventListener('input', refreshAdjustUI);
+    leaveToggle.addEventListener('change', refreshRowState);
+    statusSelect.addEventListener('change', refreshRowState);
+    refreshRowState();
+
+    adjustWrap.appendChild(adjustLabel);
+    adjustWrap.appendChild(adjustSlider);
+    adjustWrap.appendChild(adjustReadout);
+    row.appendChild(adjustWrap);
 
     resourceRowsWrap.appendChild(row);
-    rowControls.push({ resource, statusSelect, leaveLabelInput, leaveColorInput });
+    rowControls.push({
+      resource, statusSelect, leaveToggle, leaveLabelInput, leaveColorInput, adjustSlider,
+      refreshAdjustUI: refreshRowState, getEffectiveBillingType: currentEffectiveBillingType, isRowInactive
+    });
   });
 
   card.appendChild(resourceRowsWrap);
@@ -586,21 +834,29 @@ function saveDayModal({ monthKey, dateStr, holidayCheckbox, holidayLabelInput, r
     delete monthData.holidays[dateStr];
   }
 
-  rowControls.forEach(({ resource, statusSelect, leaveLabelInput, leaveColorInput }) => {
+  rowControls.forEach(({ resource, isUnbillable, statusSelect, leaveToggle, leaveLabelInput, leaveColorInput, adjustSlider }) => {
+    if (isUnbillable) return; // controlled from the Resources tab, not editable per-day
+
     const override = getResourceOverride(monthKey, resource.id);
 
     if (monthData.leaves[dateStr]) delete monthData.leaves[dateStr][resource.id];
 
-    if (statusSelect.value === 'leave') {
+    if (leaveToggle.checked) {
       if (!monthData.leaves[dateStr]) monthData.leaves[dateStr] = {};
       monthData.leaves[dateStr][resource.id] = {
         label: leaveLabelInput.value.trim() || 'Leave',
         color: leaveColorInput.value
       };
-    } else if (statusSelect.value === 'inherit') {
+      delete override.dayAdjustments[dateStr]; // leave always zeroes the day, adjustment is meaningless
       delete override.dayOverrides[dateStr];
     } else {
-      override.dayOverrides[dateStr] = statusSelect.value;
+      const noWorkValue = statusSelect.value === 'inherit' || statusSelect.value === 'weekend';
+      if (noWorkValue) delete override.dayOverrides[dateStr];
+      else override.dayOverrides[dateStr] = statusSelect.value;
+
+      const adjustment = parseFloat(adjustSlider.value) || 0;
+      if (adjustment === 0 || statusSelect.value === 'weekend') delete override.dayAdjustments[dateStr];
+      else override.dayAdjustments[dateStr] = adjustment;
     }
   });
 
@@ -619,10 +875,184 @@ function closeModal() {
 }
 
 /* =========================================================
+   BULK "ADJUST EFFORT TO HIT TARGET" MODAL
+   ========================================================= */
+
+/**
+ * Projects the month's grand total if a uniform effort % (in 3.125% / 0.25h steps)
+ * is applied to every resource on every working day from fromDateStr to month end.
+ * Days before fromDateStr keep their currently saved hours.
+ */
+function computeProjectedTotal(fromDateStr, percent) {
+  const monthKey = getCurrentMonthKey();
+  const monthData = getMonthData(monthKey);
+  const weeks = buildCalendarWeeks(currentYear, currentMonth);
+  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+  let total = 0;
+
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateObj = new Date(currentYear, currentMonth, day);
+    const dateStr = dateKeyFromDate(dateObj);
+    const weekNum = getWeekNumberForDate(dateObj, weeks);
+
+    if (dateStr < fromDateStr) {
+      state.resourceList.forEach(resource => {
+        total += computeResourceDay(monthKey, resource.id, dateObj, weekNum).hours;
+      });
+      continue;
+    }
+
+    if (isWeekend(dateObj) || monthData.holidays[dateStr]) continue;
+
+    state.resourceList.forEach(resource => {
+      const leaveEntry = monthData.leaves[dateStr] && monthData.leaves[dateStr][resource.id];
+      if (leaveEntry) return;
+      const billingType = resolveBillingType(monthKey, resource.id, dateStr, weekNum);
+      const base = billingType === 'full' ? 8 : 4;
+      const delta = base * (percent - 100) / 100;
+      total += Math.max(0, roundToQuarter(base + delta));
+    });
+  }
+  return total;
+}
+
+function openBulkAdjustModal() {
+  const monthKey = getCurrentMonthKey();
+  const monthData = getMonthData(monthKey);
+  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+  const monthStartStr = dateKeyFromParts(currentYear, currentMonth, 1);
+  const monthEndStr = dateKeyFromParts(currentYear, currentMonth, daysInMonth);
+  const targetTotal = Number(monthData.target.baseHours || 0) + Number(monthData.target.additionalHours || 0);
+
+  const modalRoot = document.getElementById('modalRoot');
+  modalRoot.innerHTML = '';
+  modalRoot.hidden = false;
+
+  const card = document.createElement('div');
+  card.className = 'modal-card';
+  card.innerHTML = `
+    <h3>Adjust effort to hit target</h3>
+    <p class="modal-sub">Scale every resource's daily hours from a chosen date through month end, in 3.125% (0.25h) steps, to close the gap to your target.</p>
+  `;
+
+  const fromLabel = document.createElement('label');
+  fromLabel.style.cssText = 'display:flex;flex-direction:column;gap:5px;font-size:12.5px;font-weight:600;color:var(--ink-soft);margin-bottom:14px;';
+  fromLabel.textContent = 'Apply from';
+  const fromInput = document.createElement('input');
+  fromInput.type = 'date';
+  fromInput.min = monthStartStr;
+  fromInput.max = monthEndStr;
+  fromInput.value = (today >= new Date(currentYear, currentMonth, 1) && today <= new Date(currentYear, currentMonth, daysInMonth))
+    ? dateKeyFromDate(today) : monthStartStr;
+  fromLabel.appendChild(fromInput);
+  card.appendChild(fromLabel);
+
+  const sliderWrap = document.createElement('div');
+  sliderWrap.className = 'adjust-wrap master-adjust-wrap';
+  sliderWrap.style.marginBottom = '16px';
+  const sliderLabel = document.createElement('span');
+  sliderLabel.className = 'adjust-label';
+  sliderLabel.textContent = 'Effort %';
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '50';
+  slider.max = '150';
+  slider.step = '3.125';
+  slider.value = '100';
+  const sliderReadout = document.createElement('span');
+  sliderReadout.className = 'adjust-readout';
+  sliderReadout.textContent = '100%';
+  sliderWrap.appendChild(sliderLabel);
+  sliderWrap.appendChild(slider);
+  sliderWrap.appendChild(sliderReadout);
+  card.appendChild(sliderWrap);
+
+  const preview = document.createElement('div');
+  preview.className = 'bulk-preview';
+  card.appendChild(preview);
+
+  function refreshPreview() {
+    const percent = parseFloat(slider.value);
+    sliderReadout.textContent = percent.toFixed(3).replace(/\.?0+$/, '') + '%';
+    const fullHours = Math.max(0, roundToQuarter(8 * (1 + (percent - 100) / 100)));
+    const partialHours = Math.max(0, roundToQuarter(4 * (1 + (percent - 100) / 100)));
+    const projectedTotal = computeProjectedTotal(fromInput.value, percent);
+    const diff = projectedTotal - targetTotal;
+    preview.innerHTML = `
+      <div class="bulk-preview-row"><span>Full day becomes</span><strong>${fullHours}h</strong></div>
+      <div class="bulk-preview-row"><span>Partial day becomes</span><strong>${partialHours}h</strong></div>
+      <div class="bulk-preview-row"><span>Projected month total</span><strong>${projectedTotal}h</strong></div>
+      <div class="bulk-preview-row ${diff >= 0 ? 'positive' : 'negative'}"><span>Vs. target (${targetTotal}h)</span><strong>${diff >= 0 ? '+' : ''}${diff}h</strong></div>
+    `;
+  }
+
+  slider.addEventListener('input', refreshPreview);
+  fromInput.addEventListener('change', refreshPreview);
+  refreshPreview();
+
+  const actions = document.createElement('div');
+  actions.className = 'modal-actions';
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'ghost-btn';
+  cancelBtn.style.color = 'var(--ink)';
+  cancelBtn.style.borderColor = 'var(--border-strong)';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', closeModal);
+  const applyBtn = document.createElement('button');
+  applyBtn.className = 'primary-btn';
+  applyBtn.textContent = 'Apply';
+  applyBtn.addEventListener('click', () => {
+    applyBulkAdjust(fromInput.value, parseFloat(slider.value));
+  });
+  actions.appendChild(cancelBtn);
+  actions.appendChild(applyBtn);
+  card.appendChild(actions);
+
+  modalRoot.appendChild(card);
+  modalRoot.addEventListener('click', e => { if (e.target === modalRoot) closeModal(); }, { once: true });
+}
+
+function applyBulkAdjust(fromDateStr, percent) {
+  const monthKey = getCurrentMonthKey();
+  const monthData = getMonthData(monthKey);
+  const weeks = buildCalendarWeeks(currentYear, currentMonth);
+  const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+  let affectedDays = 0;
+
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dateObj = new Date(currentYear, currentMonth, day);
+    const dateStr = dateKeyFromDate(dateObj);
+    if (dateStr < fromDateStr) continue;
+    if (isWeekend(dateObj) || monthData.holidays[dateStr]) continue;
+    const weekNum = getWeekNumberForDate(dateObj, weeks);
+    affectedDays++;
+
+    state.resourceList.forEach(resource => {
+      const leaveEntry = monthData.leaves[dateStr] && monthData.leaves[dateStr][resource.id];
+      if (leaveEntry) return;
+      const override = getResourceOverride(monthKey, resource.id);
+      const billingType = resolveBillingType(monthKey, resource.id, dateStr, weekNum);
+      const base = billingType === 'full' ? 8 : 4;
+      const delta = roundToQuarter(base * (percent - 100) / 100);
+      if (delta === 0) delete override.dayAdjustments[dateStr];
+      else override.dayAdjustments[dateStr] = delta;
+    });
+  }
+
+  saveState();
+  closeModal();
+  renderCalendarTab();
+  renderCalcTab();
+  showToast(`Effort set to ${percent}% for ${affectedDays} working day(s)`);
+}
+
+document.getElementById('bulkAdjustBtn').addEventListener('click', openBulkAdjustModal);
+
+/* =========================================================
    RENDER: LEAVES & HOLIDAYS TAB
    ========================================================= */
 
-const LEAVE_COLORS = ['#D9556B', '#D98E2B', '#6D5DAB', '#3A8FB7', '#4E8C5E'];
+const LEAVE_COLORS = ['#E14F73', '#D98E2B', '#6D5DAB', '#3A8FB7', '#4E8C5E'];
 let selectedLeaveColor = LEAVE_COLORS[0];
 
 function renderLeaveColorPicker() {
@@ -806,7 +1236,11 @@ function renderCalcTab() {
     { label: 'Planned capacity', value: capacity.grandTotal, cls: '' },
     { label: 'Target (exact)', value: targetTotal, cls: '' },
     { label: 'Surplus vs. exact target', value: (surplusActual >= 0 ? '+' : '') + surplusActual, cls: surplusActual >= 0 ? 'positive' : 'negative' },
-    { label: 'Surplus vs. rounded target', value: (surplusRounded >= 0 ? '+' : '') + surplusRounded, cls: surplusRounded >= 0 ? 'positive' : 'negative' }
+    { label: 'Surplus vs. rounded target', value: (surplusRounded >= 0 ? '+' : '') + surplusRounded, cls: surplusRounded >= 0 ? 'positive' : 'negative' },
+    { label: 'Working days', value: capacity.workingDayCount, cls: '' },
+    { label: 'Public holidays', value: capacity.holidayCount, cls: '' },
+    { label: 'Leave instances', value: capacity.leaveInstanceCount, cls: '' },
+    { label: 'Unbillable instances', value: capacity.unbillableInstanceCount, cls: '' }
   ];
   cards.forEach(c => {
     const card = document.createElement('div');
@@ -814,6 +1248,9 @@ function renderCalcTab() {
     card.innerHTML = `<div class="label">${c.label}</div><div class="value">${c.value}</div>`;
     summaryCards.appendChild(card);
   });
+
+  renderDailyHoursChart(capacity, targetTotal);
+  renderCompositionChart(capacity);
 
   // Weekly table
   const weeklyBody = document.querySelector('#weeklyTable tbody');
@@ -852,6 +1289,79 @@ function renderCalcTab() {
   });
   const footCells = weekNumbers.map(w => `<td class="num">${capacity.weekTotals[w] || 0}</td>`).join('');
   matrixFoot.innerHTML = `<tr><td>All resources</td>${footCells}<td class="num">${capacity.grandTotal}</td></tr>`;
+}
+
+/** Bar chart of planned hours per day, with a dashed reference line for the average daily target. */
+function renderDailyHoursChart(capacity, targetTotal) {
+  const container = document.getElementById('dailyHoursChart');
+  const dayList = capacity.orderedDates;
+  if (!dayList.length) { container.innerHTML = '<p class="chart-empty">No data yet.</p>'; return; }
+
+  const maxHours = Math.max(...dayList.map(d => d.total), 8);
+  const width = 760, height = 230, padLeft = 8, padRight = 8, padTop = 14, padBottom = 26;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+  const slot = plotW / dayList.length;
+  const barWidth = Math.max(2, slot - 3);
+  const avgTarget = capacity.workingDayCount > 0 ? targetTotal / capacity.workingDayCount : 0;
+
+  let bars = '';
+  dayList.forEach((d, i) => {
+    const x = padLeft + i * slot;
+    const barH = maxHours > 0 ? (d.total / maxHours) * plotH : 0;
+    const y = padTop + (plotH - barH);
+    let fill = 'var(--brand)';
+    if (d.isHoliday) fill = 'var(--holiday)';
+    else if (d.isWeekend) fill = 'var(--weekend)';
+    bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${Math.max(barH, 1).toFixed(1)}" rx="2" fill="${fill}"><title>${formatShortDate(d.dateObj)}: ${d.total}h</title></rect>`;
+  });
+
+  let refLine = '';
+  if (avgTarget > 0 && avgTarget <= maxHours) {
+    const refY = padTop + (plotH - (avgTarget / maxHours) * plotH);
+    refLine = `<line x1="${padLeft}" y1="${refY.toFixed(1)}" x2="${width - padRight}" y2="${refY.toFixed(1)}" stroke="var(--leave)" stroke-width="1.5" stroke-dasharray="5,4" />
+      <text x="${width - padRight}" y="${(refY - 6).toFixed(1)}" text-anchor="end" font-size="10.5" fill="var(--leave)" font-family="var(--font-mono)">avg/day target ${avgTarget.toFixed(1)}h</text>`;
+  }
+
+  const labelEvery = Math.max(1, Math.ceil(dayList.length / 8));
+  let labels = '';
+  dayList.forEach((d, i) => {
+    if (i % labelEvery === 0) {
+      const x = padLeft + i * slot + barWidth / 2;
+      labels += `<text x="${x.toFixed(1)}" y="${height - 8}" text-anchor="middle" font-size="10" fill="var(--ink-faint)" font-family="var(--font-mono)">${d.dateObj.getDate()}</text>`;
+    }
+  });
+
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${bars}${refLine}${labels}</svg>`;
+}
+
+/** Horizontal bar breakdown of working days vs. holidays vs. leave instances for the month. */
+function renderCompositionChart(capacity) {
+  const container = document.getElementById('compositionChart');
+  const items = [
+    { label: 'Working days', value: capacity.workingDayCount, color: 'var(--full)' },
+    { label: 'Holidays', value: capacity.holidayCount, color: 'var(--holiday)' },
+    { label: 'Leave instances', value: capacity.leaveInstanceCount, color: 'var(--leave)' },
+    { label: 'Unbillable instances', value: capacity.unbillableInstanceCount, color: 'var(--ink-faint)' }
+  ];
+  const maxVal = Math.max(...items.map(i => i.value), 1);
+  const width = 320, rowHeight = 48, height = items.length * rowHeight + 8;
+  const labelColumnWidth = 34;
+  const barMaxWidth = width - labelColumnWidth;
+
+  let rows = '';
+  items.forEach((item, i) => {
+    const barWidth = Math.max((item.value / maxVal) * barMaxWidth, item.value > 0 ? 4 : 0);
+    const y = 8 + i * rowHeight;
+    rows += `
+      <text x="0" y="${y + 12}" font-size="12" fill="var(--ink-soft)" font-family="Inter, sans-serif">${item.label}</text>
+      <rect x="0" y="${y + 18}" width="${barMaxWidth}" height="11" rx="5.5" fill="var(--surface-sunken)" />
+      <rect x="0" y="${y + 18}" width="${barWidth.toFixed(1)}" height="11" rx="5.5" fill="${item.color}" />
+      <text x="${width}" y="${y + 27}" text-anchor="end" font-size="13" font-weight="700" font-family="var(--font-mono)" fill="var(--ink)">${item.value}</text>
+    `;
+  });
+
+  container.innerHTML = `<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${rows}</svg>`;
 }
 
 document.getElementById('baseTargetInput').addEventListener('input', e => {
@@ -951,7 +1461,27 @@ document.getElementById('importFileInput').addEventListener('change', e => {
    INIT
    ========================================================= */
 
+const THEME_STORAGE_KEY = 'resourcePlannerTheme';
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  document.getElementById('themeToggleBtn').textContent = theme === 'dark' ? '☀️' : '🌙';
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_STORAGE_KEY);
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  applyTheme(saved || (prefersDark ? 'dark' : 'light'));
+}
+
+document.getElementById('themeToggleBtn').addEventListener('click', () => {
+  const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  applyTheme(next);
+  localStorage.setItem(THEME_STORAGE_KEY, next);
+});
+
 function init() {
+  initTheme();
   currentYear = today.getFullYear();
   currentMonth = today.getMonth();
   renderAll();
