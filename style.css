@@ -738,8 +738,8 @@ select:focus {
 }
 
 .cal-cell.today {
-  border: 2px solid var(--today-accent);
-  box-shadow: 0 0 0 3px var(--today-glow);
+  border-color: var(--brand);
+  box-shadow: var(--shadow-glow);
 }
 
 .cal-cell.is-holiday {
