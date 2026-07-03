@@ -74,6 +74,8 @@ function getAdjustmentStep(billingType) {
 }
 
 function getResourceColor(resourceId) {
+  const resourceObj = state.resourceList.find(r => r.id === resourceId);
+  if (resourceObj && resourceObj.color) return resourceObj.color;
   const idx = state.resourceList.findIndex(r => r.id === resourceId);
   return RESOURCE_COLORS[Math.max(idx, 0) % RESOURCE_COLORS.length];
 }
@@ -332,10 +334,18 @@ function renderResourcesTab() {
     const top = document.createElement('div');
     top.className = 'resource-card-top' + (activeThisMonth ? '' : ' is-inactive-period');
 
-    const dot = document.createElement('span');
-    dot.className = 'resource-dot';
-    dot.style.background = getResourceColor(resource.id);
-    top.appendChild(dot);
+    const colorInput = document.createElement('input');
+    colorInput.type = 'color';
+    colorInput.className = 'resource-dot-input';
+    colorInput.value = getResourceColor(resource.id);
+    colorInput.title = 'Change resource colour';
+    colorInput.addEventListener('input', () => {
+      resource.color = colorInput.value;
+      saveState();
+      renderCalendarTab();
+      renderCalcTab();
+    });
+    top.appendChild(colorInput);
 
     const nameInput = document.createElement('input');
     nameInput.className = 'resource-name-input';

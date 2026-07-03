@@ -523,6 +523,34 @@ select:focus {
   box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 15%, transparent);
 }
 
+.resource-dot-input {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: none;
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  background: none;
+  flex-shrink: 0;
+}
+
+.resource-dot-input::-webkit-color-swatch-wrapper {
+  padding: 0;
+  border-radius: 50%;
+}
+
+.resource-dot-input::-webkit-color-swatch {
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+}
+
+.resource-dot-input::-moz-color-swatch {
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+}
+
 .resource-name-input {
   border: 1px solid transparent;
   background: transparent;
