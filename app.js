@@ -982,10 +982,6 @@ function computeProjectedTotal(fromDateStr, percent) {
   return total;
 }
 
-// Remembers the last date/percent chosen in the bulk-adjust modal so reopening it doesn't reset the view.
-let bulkAdjustLastFromDate = null;
-let bulkAdjustLastPercent = 100;
-
 function openBulkAdjustModal() {
   const monthKey = getCurrentMonthKey();
   const monthData = getMonthData(monthKey);
@@ -993,6 +989,7 @@ function openBulkAdjustModal() {
   const monthStartStr = dateKeyFromParts(currentYear, currentMonth, 1);
   const monthEndStr = dateKeyFromParts(currentYear, currentMonth, daysInMonth);
   const targetTotal = Number(monthData.target.baseHours || 0) + Number(monthData.target.additionalHours || 0);
+  const remembered = monthData.lastBulkAdjust || {};
 
   const defaultFromDate = (today >= new Date(currentYear, currentMonth, 1) && today <= new Date(currentYear, currentMonth, daysInMonth))
     ? dateKeyFromDate(today) : monthStartStr;
@@ -1015,7 +1012,7 @@ function openBulkAdjustModal() {
   fromInput.type = 'date';
   fromInput.min = monthStartStr;
   fromInput.max = monthEndStr;
-  fromInput.value = bulkAdjustLastFromDate || defaultFromDate;
+  fromInput.value = remembered.fromDate || defaultFromDate;
   fromLabel.appendChild(fromInput);
   card.appendChild(fromLabel);
 
@@ -1030,10 +1027,10 @@ function openBulkAdjustModal() {
   slider.min = '50';
   slider.max = '150';
   slider.step = '3.125';
-  slider.value = String(bulkAdjustLastPercent);
+  slider.value = String(remembered.percent || 100);
   const sliderReadout = document.createElement('span');
   sliderReadout.className = 'adjust-readout';
-  sliderReadout.textContent = bulkAdjustLastPercent + '%';
+  sliderReadout.textContent = (remembered.percent || 100) + '%';
   sliderWrap.appendChild(sliderLabel);
   sliderWrap.appendChild(slider);
   sliderWrap.appendChild(sliderReadout);
@@ -1080,14 +1077,14 @@ function openBulkAdjustModal() {
     `;
   }
 
-  slider.addEventListener('input', () => {
-    bulkAdjustLastPercent = parseFloat(slider.value);
-    refreshPreview();
-  });
-  fromInput.addEventListener('change', () => {
-    bulkAdjustLastFromDate = fromInput.value;
-    refreshPreview();
-  });
+  function persistRemembered() {
+    monthData.lastBulkAdjust = { fromDate: fromInput.value, percent: parseFloat(slider.value) };
+    saveState();
+  }
+
+  slider.addEventListener('input', refreshPreview);
+  slider.addEventListener('change', persistRemembered);
+  fromInput.addEventListener('change', () => { persistRemembered(); refreshPreview(); });
   refreshPreview();
 
   const actions = document.createElement('div');
@@ -1102,8 +1099,7 @@ function openBulkAdjustModal() {
   resetBtn.addEventListener('click', () => {
     slider.value = '100';
     fromInput.value = defaultFromDate;
-    bulkAdjustLastPercent = 100;
-    bulkAdjustLastFromDate = defaultFromDate;
+    persistRemembered();
     refreshPreview();
   });
 
@@ -1117,6 +1113,7 @@ function openBulkAdjustModal() {
   applyBtn.className = 'primary-btn';
   applyBtn.textContent = 'Apply';
   applyBtn.addEventListener('click', () => {
+    persistRemembered();
     applyBulkAdjust(fromInput.value, parseFloat(slider.value));
   });
   actions.appendChild(resetBtn);
